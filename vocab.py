@@ -7,6 +7,8 @@ class Vocabulary():
     UNKNOWN = '<unk>'
     BOS = '<bos>'
     EOS = '<eos>'
+    TOKEN_NOT_IN_TAGVOCAB = -1
+    PADTOKEN_FOR_TAGVOCAB = -2
     
     def __init__(self, data, vocab_size, alltags):
         self.vocab_size = vocab_size
@@ -28,24 +30,11 @@ class Vocabulary():
                 tag_cntr[tup[1]][tup[0]] += 1
         self.tag_specific_vocab = {}
         for tag in tag_cntr:
-            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], None)
+            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], None, True)
             voc_size = len(tok2ind)
             self.tag_specific_vocab[tag] = (tok2ind, ind2tok, voc_size)
-  
-    def get_vocab_counter(self):
-        """
-         Use collections.Counter() to get unique words and their counts
-         -Args:
-            dataset: a pandas dataset of interst
-         -Returns:
-            vocab_counter: a counter object, in format {word: count}
-        """
-        vocab_counter = Counter()
-        for i in range(len(self.train)):
-            vocab_counter.update(self.train[i])
-        return vocab_counter
 
-    def build_dict(self, vocab, vocab_size = None):
+    def build_dict(self, vocab, vocab_size = None, tag_specific=False):
         """
         Generate word-index-dict
         -Args:
@@ -59,7 +48,11 @@ class Vocabulary():
         else:
             vocab = list(vocab.keys())
         
-        vocab = [Vocabulary.BOS, Vocabulary.EOS, Vocabulary.PADDING, Vocabulary.UNKNOWN] + vocab
+        if tag_specific:
+            vocab = [Vocabulary.EOS] + vocab
+        else:
+            vocab = [Vocabulary.BOS, Vocabulary.EOS, Vocabulary.PADDING, Vocabulary.UNKNOWN] + vocab
+            
         token2idx = dict(zip(vocab, range(len(vocab))))
         idx2token = {v:k for k,v in token2idx.items()}
         return token2idx, idx2token
@@ -74,7 +67,7 @@ class Vocabulary():
         if token in self.tag_specific_vocab[tag][0]:
             return self.tag_specific_vocab[tag][0][token]
         else:
-            return self.tag_specific_vocab[tag][0][Vocabulary.UNKNOWN]
+            return Vocabulary.TOKEN_NOT_IN_TAGVOCAB
         
     
     def get_token(self, idx):
