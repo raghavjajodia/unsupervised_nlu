@@ -166,7 +166,7 @@ def latent_loss(outputs, target, device):
     crossEntropy_tag = nn.CrossEntropyLoss(reduction='none')
     taglogitloss = [-crossEntropy_tag(tag_logits.transpose(1,2), torch.zeros((btchSize, sentLen), dtype=torch.long, device=device) + j) for j in range(numtags)]
     
-    ignore_mask = (target == Vocabulary.TOKEN_NOT_IN_TAGVOCAB | target == Vocabulary.PADTOKEN_FOR_TAGVOCAB)
+    ignore_mask = ((target == Vocabulary.TOKEN_NOT_IN_TAGVOCAB) | (target == Vocabulary.PADTOKEN_FOR_TAGVOCAB))
     target_with_ignore = target.clone()
     target_with_ignore[ignore_mask] == -100
     crossEntropy_word = nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
