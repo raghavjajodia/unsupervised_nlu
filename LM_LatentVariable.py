@@ -18,7 +18,7 @@ import time
 import copy
 
 from models import LM_latent
-from vocab_imp1 import Vocabulary
+from vocab import Vocabulary
 
 
 # In[2]:
@@ -179,7 +179,9 @@ def latent_loss(outputs, target, device):
     
     #mask the tags if output word is not present in tag's vocab
     outofvocab_mask = (target.view(btchSize, sentLen, numtags) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
-    totalloss[outofvocab_mask] = float('-inf')   
+    temp = outofvocab_mask*1.0
+    temp[outofvocab_mask] = float('-inf')
+    totalloss = totalloss + temp
     
     finalLoss = -log_sum_exp(totalloss, dim=-1)
     
@@ -410,10 +412,10 @@ dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffl
 options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
            "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id}
 
-lr = 0.001
+lr = 0.01
 stepsize = 5
 epochs = 30
-outfolder = '/data/rj1408/ptb_wsj_pos/models/basic_imp1/a/'
+outfolder = '/data/rj1408/ptb_wsj_pos/models/basic_imp2/a/'
 
 model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers).to(device)
 criterion = latent_loss
