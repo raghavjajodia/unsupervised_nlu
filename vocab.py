@@ -21,20 +21,21 @@ class Vocabulary():
         self.vocab_size = len(self.token2idx)
         
         #create vocab for every pos tag
+        tag_cntr = dict([(tag, Counter()) for tag in self.alltags])
         lis = self.train['tagged_words']
-        tag_cntr = {}
         for tup in lis:
             if tup[1] in self.alltags:
-                if tup[1] not in tag_cntr:
-                    tag_cntr[tup[1]] = Counter()
                 tag_cntr[tup[1]][tup[0]] += 1
+            else:
+                tag_cntr['UNKNOWN'][tup[0]] += 1
+        
         self.tag_specific_vocab = {}
         for tag in tag_cntr:
-            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], None, True)
+            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], None, tag)
             voc_size = len(tok2ind)
             self.tag_specific_vocab[tag] = (tok2ind, ind2tok, voc_size)
 
-    def build_dict(self, vocab, vocab_size = None, tag_specific=False):
+    def build_dict(self, vocab, vocab_size = None, tag_specific=None):
         """
         Generate word-index-dict
         -Args:
@@ -48,8 +49,9 @@ class Vocabulary():
         else:
             vocab = list(vocab.keys())
         
-        if tag_specific:
-            vocab = [Vocabulary.EOS] + vocab
+        if tag_specific is not None:
+            if tag_specific == 'UNKNOWN':
+                vocab = [Vocabulary.EOS] + vocab
         else:
             vocab = [Vocabulary.BOS, Vocabulary.EOS, Vocabulary.PADDING, Vocabulary.UNKNOWN] + vocab
             

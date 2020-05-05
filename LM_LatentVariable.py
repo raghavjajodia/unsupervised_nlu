@@ -21,15 +21,12 @@ from models import LM_latent
 from vocab import Vocabulary
 
 
-# In[2]:
-
-
 general_vocab_size = 10000
-batch_size = 64 #takes about 6gb memory
+batch_size = 128 #takes about 12gb memory with below config
 hidden_size = 512
-token_embedding_size = 128
-tag_embedding_size = 128
-lstm_layers = 2
+token_embedding_size = 256
+tag_embedding_size = 256
+lstm_layers = 3
 max_sent_len = 60
 
 num_gpus = torch.cuda.device_count()
@@ -42,9 +39,9 @@ else:
 # In[3]:
 
 
-train_pickle_file = '/data/rj1408/ptb_wsj_pos/train.p'
-val_pickle_file = '/data/rj1408/ptb_wsj_pos/val.p'
-test_pickle_file = '/data/rj1408/ptb_wsj_pos/test.p'
+train_pickle_file = 'drive/My Drive/sem4/nlu/train.p'
+val_pickle_file = 'drive/My Drive/sem4/nlu/val.p'
+test_pickle_file = 'drive/My Drive/sem4/nlu/test.p'
 
 with open(train_pickle_file,"rb") as f:
     traindict = pkl.load(f)
@@ -57,10 +54,11 @@ with open(test_pickle_file,"rb") as f:
 # In[4]:
 
 
-with open('tagset.txt') as f:
+with open('drive/My Drive/sem4/nlu/tagset.txt') as f:
     alltags = f.read()
 
 alltags = list(map(lambda strline: strline.split('\t')[1], alltags.split('\n')))
+alltags = alltags + ['UNKNOWN']
 alltags = set(alltags)
 
 tag2id = defaultdict(int)
@@ -68,11 +66,9 @@ id2tag = defaultdict(str)
 for i, tag in enumerate(alltags):
     tag2id[tag] = i
     id2tag[i] = tag
-UNKNOWN_TAG = -50
+    
+UNKNOWN_TAG = tag2id['UNKNOWN']
 PAD_TAG_ID = -51
-
-# In[5]:
-
 
 class POSDataset(object):
     def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60):
@@ -91,7 +87,7 @@ class POSDataset(object):
             self.input_sents.append(input_toks)
             self.output_sents.append(output_toks)
         
-        self.tags = [([self.tag2id[s[1]] if s[1] in self.tag2id else UNKNOWN_TAG for s in sentences][:max_sent_len]) + [UNKNOWN_TAG] for sentences in self.root]
+        self.tags = [([self.tag2id[s[1]] if s[1] in self.tag2id else self.tag2id['UNKNOWN'] for s in sentences][:max_sent_len]) + [self.tag2id['UNKNOWN']] for sentences in self.root]
     
     def __len__(self):
         return len(self.root)
@@ -101,8 +97,6 @@ class POSDataset(object):
         input_tensor = torch.as_tensor(self.input_sents[idx], dtype=torch.long)
         output_tensor = torch.as_tensor(self.output_sents[idx], dtype=torch.long)
         return (input_tensor, output_tensor, target_tensor)
-
-
 # In[6]:
 
 
@@ -155,6 +149,9 @@ def log_sum_exp(value, dim=None, keepdim=False):
             return m + torch.log(sum_exp)
 
 def latent_loss(outputs, target, device):
+    """Numerically stable implementation of the language modeling loss
+
+    """
     #target dim # btchsize x numtags x sentLen
     tag_logits = outputs[0] #btchsize x sentlen x numtags
     word_dist_logits = outputs[1] #list #for jth tag -> batch_size, sent_len, j_vocab_size
@@ -163,44 +160,40 @@ def latent_loss(outputs, target, device):
     btchSize = tag_logits.shape[0]
     sentLen = tag_logits.shape[1]
     
+    #calculate loss for tags
     crossEntropy_tag = nn.CrossEntropyLoss(reduction='none')
     taglogitloss = [-crossEntropy_tag(tag_logits.transpose(1,2), torch.zeros((btchSize, sentLen), dtype=torch.long, device=device) + j) for j in range(numtags)]
     
+    #calculate loss for words
     ignore_mask = ((target == Vocabulary.TOKEN_NOT_IN_TAGVOCAB) | (target == Vocabulary.PADTOKEN_FOR_TAGVOCAB))
     target_with_ignore = target.clone()
-    target_with_ignore[ignore_mask] == -100
+    target_with_ignore[ignore_mask] = -100
     crossEntropy_word = nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     wordlogitloss = [-crossEntropy_word(word_logit.transpose(1,2), target_with_ignore[:, j, :])  for j, word_logit in enumerate(word_dist_logits)]
     
     taglogitloss = torch.stack(taglogitloss)
     wordlogitloss = torch.stack(wordlogitloss)
     totalloss = taglogitloss + wordlogitloss
-    totalloss = totalloss.view(btchSize, sentLen, numtags)
     
-    #mask the tags if output word is not present in tag's vocab
-    outofvocab_mask = (target.view(btchSize, sentLen, numtags) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
-    temp = outofvocab_mask*1.0
-    temp[outofvocab_mask] = float('-inf')
-    totalloss = totalloss + temp
-    
-    finalLoss = -log_sum_exp(totalloss, dim=-1)
+    #0 loss for a tag if output word is not present in tag's vocab
+    outofvocab_mask = (torch.transpose(target, 0, 1) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
+    totalloss[outofvocab_mask] = float('-inf')
+
+    finalLoss = -log_sum_exp(totalloss, dim=0)
     
     #mask the loss from tokens, if the output token is not present in even single tag category
-    presentInZeroTagMask = torch.all((target.view(btchSize, sentLen, numtags) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB), dim=-1)
-    
+    presentInZeroTagMask = torch.all((torch.transpose(target, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB), dim=-1)
     #mask the loss of padding tokens
     paddingMask = (target[:, 0, :] == Vocabulary.PADTOKEN_FOR_TAGVOCAB)
-    
     tokenContributingToZeroLoss = (presentInZeroTagMask | paddingMask)
-    useful_tokens = (~tokenContributingToZeroLoss).sum().item()
+    num_useful_tokens = (~tokenContributingToZeroLoss).sum().item()
     
-    return torch.sum(finalLoss[~tokenContributingToZeroLoss]), useful_tokens
-
+    return torch.sum(finalLoss[~tokenContributingToZeroLoss]), num_useful_tokens
 
 # In[8]:
 
 
-def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path, f, verbIter, hyperparams, padtoken, num_epochs=25):
+def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path, f, verbIter, hyperparams, num_epochs=25):
     metrics_dict = {}
     metrics_dict["train"] = {}
     metrics_dict["valid"] = {}
@@ -250,7 +243,7 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
             with torch.set_grad_enabled(True):
                 outputs = model(inputs)
                 loss, useful_tokens = criterion(outputs, target, device)
-
+                
                 # statistics
                 running_loss += loss.item()
 
@@ -283,7 +276,7 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
 
         
         #val phase
-        epoch_loss, tokenaccuracy, sentaccuracy = evaluate(model, criterion, device, dataloaders["valid"], padtoken)
+        epoch_loss, tokenaccuracy, sentaccuracy = evaluate(model, criterion, device, dataloaders["valid"])
         f.write('Validation Loss: {:.4f}, Perplexity: {},  TokenAccuracy: {}, SentAccuracy: {} \n'.format(epoch_loss, perplexity(epoch_loss), tokenaccuracy, sentaccuracy))
         f.flush()
         metrics_dict["valid"]["loss"].append(epoch_loss)
@@ -314,26 +307,35 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
 
 
 # In[9]:
+def getTagPredictions(tag_logits, targets):
+    #targets dim # btchsize x numtags x sentLen
+    btch_size = tag_logits.shape[0]
+    sent_len = tag_logits.shape[1]
+    num_tags = tag_logits.shape[2]
+
+    tag_logits_cloned = tag_logits.clone()
+    outofvocab_mask = (torch.transpose(targets, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
+    tag_logits_cloned[outofvocab_mask] = float('-inf')
+    predictions = torch.max(tag_logits_cloned, dim=-1).indices #btchsize x sentlen
+    return predictions
 
 
 def perplexity(avg_epoch_loss):
     return 2**(avg_epoch_loss/np.log(2))
 
-def getTokenAccuracy(tag_logits, labels):
+def getTokenAccuracy(tag_logits, labels, targets):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    num_tags = tag_logits.shape[2]
-    predictions = torch.max(tag_logits, dim=-1).indices #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     num = (predictions[mask] == labels[mask]).sum().item()
     den = labels[mask].shape[0]
     return num, den
 
-def getSentenceAccuracy(tag_logits, labels):
+def getSentenceAccuracy(tag_logits, labels, targets):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    num_tags = tag_logits.shape[2]
-    predictions = torch.max(tag_logits, dim=-1).indices #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     
     sentCount = 0
@@ -347,7 +349,7 @@ def getSentenceAccuracy(tag_logits, labels):
     return sentCount, tag_logits.shape[0]
 
 
-def evaluate(model, criterion, device, validation_loader, padtoken):  
+def evaluate(model, criterion, device, validation_loader):  
     model.eval()   # Set model to evaluate mode
     running_loss = 0.0
     running_word = 0
@@ -372,10 +374,10 @@ def evaluate(model, criterion, device, validation_loader, padtoken):
                     
         # statistics
         running_loss += loss.item()
-        num, den = getTokenAccuracy(outputs[0], labels)
+        num, den = getTokenAccuracy(outputs[0], labels, targets)
         running_word += num
         total_words += den
-        num, den = getSentenceAccuracy(outputs[0], labels)
+        num, den = getSentenceAccuracy(outputs[0], labels, targets)
         running_sent += num
         total_sents += den
 
@@ -415,7 +417,7 @@ options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_em
 lr = 0.01
 stepsize = 5
 epochs = 30
-outfolder = '/data/rj1408/ptb_wsj_pos/models/basic_imp2/a/'
+outfolder = 'drive/My Drive/sem4/nlu/models/basic_imp4/a/'
 
 model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers).to(device)
 criterion = latent_loss
@@ -423,11 +425,4 @@ model_parameters = [p for p in model.parameters() if p.requires_grad]
 optimizer = optim.Adam(model_parameters, lr=lr)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
 f = open(os.path.join(outfolder, 'training_logs.txt'), 'w+')
-bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, 50, options, vocab.get_id(vocab.PADDING), epochs)
-
-
-# In[ ]:
-
-
-
-
+bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, 50, options, epochs)
