@@ -313,10 +313,11 @@ def getTagPredictions(tag_logits, targets):
     sent_len = tag_logits.shape[1]
     num_tags = tag_logits.shape[2]
 
-    tag_logits_cloned = tag_logits.clone()
-    outofvocab_mask = (torch.transpose(targets, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
-    tag_logits_cloned[outofvocab_mask] = float('-inf')
-    predictions = torch.max(tag_logits_cloned, dim=-1).indices #btchsize x sentlen
+#     tag_logits_cloned = tag_logits.clone()
+#     outofvocab_mask = (torch.transpose(targets, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
+#     tag_logits_cloned[outofvocab_mask] = float('-inf')
+#     predictions = torch.max(tag_logits_cloned, dim=-1).indices #btchsize x sentlen
+    predictions = torch.max(tag_logits, dim=-1).indices
     return predictions
 
 

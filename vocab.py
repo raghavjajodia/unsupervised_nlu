@@ -15,7 +15,7 @@ class Vocabulary():
         self.train = data
         self.alltags = alltags
         
-        #create generic vocab
+        #create input vocab
         word_freq = Counter([word[0] for word in self.train['tagged_words']])
         self.token2idx, self.idx2token = self.build_dict(word_freq, self.vocab_size)
         self.vocab_size = len(self.token2idx)
@@ -28,10 +28,11 @@ class Vocabulary():
                 tag_cntr[tup[1]][tup[0]] += 1
             else:
                 tag_cntr['UNKNOWN'][tup[0]] += 1
+        self.tag_cntr = tag_cntr
         
         self.tag_specific_vocab = {}
         for tag in tag_cntr:
-            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], None, tag)
+            tok2ind, ind2tok = self.build_dict(tag_cntr[tag], self.vocab_size, tag)
             voc_size = len(tok2ind)
             self.tag_specific_vocab[tag] = (tok2ind, ind2tok, voc_size)
 
@@ -39,9 +40,9 @@ class Vocabulary():
         """
         Generate word-index-dict
         -Args:
-            vocab_counter: Counter object generated from a dataset of interest
+            vocab: Counter object generated from a dataset of interest
         -Returns:
-            target_word_count: number of words to be included in the corpus
+            token2index and index2token: mapping for vocabulary
         """
         # prune vocab
         if vocab_size is not None:
@@ -51,7 +52,9 @@ class Vocabulary():
         
         if tag_specific is not None:
             if tag_specific == 'UNKNOWN':
-                vocab = [Vocabulary.EOS] + vocab
+                vocab = [Vocabulary.UNKNOWN, Vocabulary.EOS] + vocab
+            else:
+                vocab = [Vocabulary.UNKNOWN] + vocab
         else:
             vocab = [Vocabulary.BOS, Vocabulary.EOS, Vocabulary.PADDING, Vocabulary.UNKNOWN] + vocab
             
@@ -68,6 +71,8 @@ class Vocabulary():
     def get_id_tag(self, token, tag):
         if token in self.tag_specific_vocab[tag][0]:
             return self.tag_specific_vocab[tag][0][token]
+        elif token in self.tag_cntr[tag]:
+            return self.tag_specific_vocab[tag][0][Vocabulary.UNKNOWN]
         else:
             return Vocabulary.TOKEN_NOT_IN_TAGVOCAB
         
