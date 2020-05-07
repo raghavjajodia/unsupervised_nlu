@@ -9,53 +9,98 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
 import pickle as pkl
 from collections import defaultdict,deque,Counter,OrderedDict
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader,Dataset
 from torch.optim import lr_scheduler
 import os
 import time
 import copy
+import argparse
+import random
 
 from models import LM_latent
 from vocab import Vocabulary
 
 
-general_vocab_size = 10000
-batch_size = 128 #takes about 12gb memory with below config
-hidden_size = 512
-token_embedding_size = 256
-tag_embedding_size = 256
-lstm_layers = 3
-max_sent_len = 60
+############################################################ Parsing
 
-num_gpus = torch.cuda.device_count()
-if num_gpus > 0:
-    device = 'cuda'
-else:
-    device = 'cpu'
+parser = argparse.ArgumentParser()
+parser.add_argument('--dataroot', required=True, help='path to dataset')
+parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
+parser.add_argument('--batchSize', type=int, default=96, help='input batch size')
+parser.add_argument('--niter', type=int, default=30, help='number of epochs to train for')
+parser.add_argument('--lr', type=float, default=0.01, help='learning rate, default=0.001')
+parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
+parser.add_argument('--cuda', action='store_true', help='enables cuda')
+parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
+parser.add_argument('--netCont', default='', help="path to net (to continue training)")
+parser.add_argument('--outf', default='.', help='folder to output model checkpoints')
+parser.add_argument('--manualSeed', type=int, default=9090, help='manual seed')
+parser.add_argument('--verbIter', type=int, default=50, help='number of batches for interval printing')
+parser.add_argument('--stepSize', type=int, default=5, help='number of steps after which learning rate reduces')
 
+parser.add_argument('--vocabSize', type=int, default=10000 , help='max size of input and output vocabulary')
+parser.add_argument('--hiddenSize', type=int, default=512 , help='hidden size of lstm layer')
+parser.add_argument('--tokenEmbeddingSize', type=int, default=256 , help='embedding size of input token')
+parser.add_argument('--tagEmbeddingSize', type=int, default=256 , help='dimension reduction for tag prediction')
+parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm layers')
+parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
 
-# In[3]:
+opt = parser.parse_args()
 
+##################################################################3
+##Assigning device and setup
+###############################################################3
 
-train_pickle_file = 'drive/My Drive/sem4/nlu/train.p'
-val_pickle_file = 'drive/My Drive/sem4/nlu/val.p'
-test_pickle_file = 'drive/My Drive/sem4/nlu/test.p'
+max_vocab_size = opt.vocabSize
+batch_size = opt.batchSize #takes about 12gb memory with below config
+hidden_size = opt.hiddenSize
+token_embedding_size = opt.tokenEmbeddingSize
+tag_embedding_size = opt.tagEmbeddingSize
+lstm_layers = opt.lstmLayers
+max_sent_len = opt.maxSentLen
+lr = opt.lr
+stepsize = opt.stepSize
+epochs = opt.niter
+outfolder = opt.outf
 
-with open(train_pickle_file,"rb") as f:
-    traindict = pkl.load(f)
-with open(val_pickle_file,"rb") as f:
-    valdict = pkl.load(f)
-with open(test_pickle_file,"rb") as f:
-    testdict = pkl.load(f)
+try:
+    os.makedirs(opt.outf)
+except OSError:
+    pass
 
+f = open(os.path.join(outfolder, 'training_logs.txt'), 'w+')
 
-# In[4]:
+random.seed(opt.manualSeed)
+torch.manual_seed(opt.manualSeed)
+cudnn.benchmark = True
 
+if torch.cuda.is_available() and not opt.cuda:
+    f.write("WARNING: You have a CUDA device, so you should probably run with --cuda \n")
+    
+device = torch.device("cuda:0" if opt.cuda else "cpu")
+f.write("using " + str(device) + "\n")
+f.flush()
 
-with open('drive/My Drive/sem4/nlu/tagset.txt') as f:
-    alltags = f.read()
+###################################################################
+## Data Reading and Preparation
+###############################################################
+train_pickle_file = os.path.join(opt.dataroot, 'train.p')
+val_pickle_file = os.path.join(opt.dataroot, 'val.p')
+test_pickle_file = os.path.join(opt.dataroot, 'test.p')
+
+with open(train_pickle_file,"rb") as a:
+    traindict = pkl.load(a)
+with open(val_pickle_file,"rb") as a:
+    valdict = pkl.load(a)
+with open(test_pickle_file,"rb") as a:
+    testdict = pkl.load(a)
+
+with open('tagset.txt') as a:
+    alltags = a.read()
 
 alltags = list(map(lambda strline: strline.split('\t')[1], alltags.split('\n')))
 alltags = alltags + ['UNKNOWN']
@@ -70,7 +115,9 @@ for i, tag in enumerate(alltags):
 UNKNOWN_TAG = tag2id['UNKNOWN']
 PAD_TAG_ID = -51
 
-class POSDataset(object):
+######################################################################
+
+class POSDataset(Dataset):
     def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60):
         self.root = instanceDict['tagged_sents']
         self.vocab = vocab
@@ -80,14 +127,30 @@ class POSDataset(object):
         self.sents = [[s[0] for s in sentences] for sentences in self.root]
         self.input_sents = []
         self.output_sents = []
+        self.tags = []
         for sample in self.sents:
-            newsample = [Vocabulary.BOS] + sample[:max_sent_len] + [Vocabulary.EOS]
+            
+            if max_sent_len == None:
+                mlength = len(sample)
+            else:
+                mlength = max_sent_len
+                
+            newsample = [Vocabulary.BOS] + sample[:mlength] + [Vocabulary.EOS]
             input_toks = self.vocab.encode_token_seq(newsample[:-1])
             output_toks = [self.vocab.encode_token_seq_tag(newsample[1:], self.id2tag[tagid]) for tagid in self.id2tag]
             self.input_sents.append(input_toks)
             self.output_sents.append(output_toks)
-        
-        self.tags = [([self.tag2id[s[1]] if s[1] in self.tag2id else self.tag2id['UNKNOWN'] for s in sentences][:max_sent_len]) + [self.tag2id['UNKNOWN']] for sentences in self.root]
+            
+        for sentences in self.root:
+            
+            if max_sent_len == None:
+                mlength = len(sentences)
+            else:
+                mlength = max_sent_len
+            
+            outputsample = sentences[:mlength] + [(Vocabulary.EOS, 'UNKNOWN')]
+            outputsample = [self.tag2id[tup[1]] if tup[1] in self.tag2id else self.tag2id['UNKNOWN'] for tup in outputsample]
+            self.tags.append(outputsample)
     
     def __len__(self):
         return len(self.root)
@@ -391,39 +454,49 @@ def evaluate(model, criterion, device, validation_loader):
     return epoch_loss, tokenaccuracy, sentaccuracy
 
 
-# In[10]:
+#####################################################################
+## Data loading 
+####################################################################
 
-
-vocab = Vocabulary(traindict, general_vocab_size, alltags)
+vocab = Vocabulary(traindict, max_vocab_size, alltags)
 tag_wise_vocabsize = dict([(tag2id[tup[0]], tup[1][2]) for tup in vocab.tag_specific_vocab.items()])
 
 datasets = {}
 dataloaders = {}
 
 datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag)
-datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag)
-datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag)
+datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None)
+datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None)
 
 dataloaders["train"] = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn_pos, pin_memory=True)
 dataloaders["valid"] = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
 dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
 
-
-# In[ ]:
-
+##############################################################
+#Model initialization and training
+#############################################################
 
 options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
            "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id}
 
-lr = 0.01
-stepsize = 5
-epochs = 30
-outfolder = 'drive/My Drive/sem4/nlu/models/basic_imp4/a/'
+model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers)
 
-model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers).to(device)
+if opt.ngpu > 1:
+    f.write("Let's use", torch.cuda.device_count(), "GPUs!")
+    f.flush()
+    model = nn.DataParallel(model)
+
+model = model.to(device)
+
+if opt.netCont !='':
+    model.load_state_dict(torch.load(opt.netCont, map_location=device))
+    f.write('Loaded state and continuing training')
+    f.flush()
+
 criterion = latent_loss
 model_parameters = [p for p in model.parameters() if p.requires_grad]
 optimizer = optim.Adam(model_parameters, lr=lr)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
-f = open(os.path.join(outfolder, 'training_logs.txt'), 'w+')
-bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, 50, options, epochs)
+bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
+torch.save(model.state_dict(), '%s/net_best_weights.pth' % (opt.outf))
+f.close()

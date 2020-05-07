@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --output=/data/rj1408/ptb_wsj_pos/models/basic_imp1/a/train_logs.out
-#SBATCH --error=/data/rj1408/ptb_wsj_pos/models/basic_imp1/a/train_logs.err
-#SBATCH --job-name=imp1
+#SBATCH --output=/data/rj1408/ptb_wsj_pos/models/basic_imp7/a/train_logs.out
+#SBATCH --error=/data/rj1408/ptb_wsj_pos/models/basic_imp7/a/train_logs.err
+#SBATCH --job-name=imp7
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
@@ -16,4 +16,6 @@ module load cuda/9.0.176
 
 eval "$(conda shell.bash hook)"
 conda activate dgl_env
-srun python3 LM_LatentVariable_imp1.py
+srun python3 LM_LatentVariable.py --dataroot /data/rj1408/ptb_wsj_pos/ \
+    --batchSize 64 --outf /data/rj1408/ptb_wsj_pos/models/basic_imp7/a/ \
+    --cuda
