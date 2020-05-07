@@ -6,7 +6,7 @@ import math
 
 
 class LM_latent(nn.Module):
-    def __init__(self, vocab_size, tag_wise_vocab_size, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers=1):
+    def __init__(self, vocab_size, tag_wise_vocab_size, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers=1, dropout_p=0.1):
 
         super(LM_latent, self).__init__()
 
@@ -22,12 +22,14 @@ class LM_latent(nn.Module):
         self.tag_linear = nn.Linear(self.tag_embedding_size, self.num_tags)
         self.lower_hidden = nn.Linear(self.hidden_size, self.tag_embedding_size)
         self.tag_projections = nn.ModuleList([nn.Linear(self.hidden_size, self.tag_wise_vocabsize[i]) for i in range(self.num_tags)])
+        self.dropout = nn.Dropout(p=dropout_p)
         
     def forward(self,input_seq):
         
         batch_size,sent_len = input_seq.shape[0],input_seq.shape[1]
         
         embeddings = self.token_embedding(input_seq) #batch_size, sent_len, embed_size
+        embeddings = self.dropout(embeddings)
         h, _ = self.lstm(embeddings) #batch_size, sent_len, hidden_size
         
         h_lower = self.lower_hidden(h) #batch_size , sent_len, 100
@@ -37,7 +39,7 @@ class LM_latent(nn.Module):
         return tag_logits, word_distribution_logits
     
 class LM_latent_type_rep(nn.Module):
-    def __init__(self, vocab_size, tag_wise_vocab_size, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers=1):
+    def __init__(self, vocab_size, tag_wise_vocab_size, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers=1, dropout_p=0.1):
 
         super(LM_latent_type_rep, self).__init__()
 
@@ -54,6 +56,7 @@ class LM_latent_type_rep(nn.Module):
         self.tag_linear = nn.Linear(self.tag_embedding_size, self.num_tags)
         self.lower_hidden = nn.Linear(self.hidden_size, self.tag_embedding_size)
         self.tag_projections = nn.ModuleList([nn.Linear(self.hidden_size, self.tag_wise_vocabsize[i]) for i in range(self.num_tags)])
+        self.dropout = nn.Dropout(p=dropout_p)
         
     def forward(self,input_seq):
         
@@ -66,6 +69,7 @@ class LM_latent_type_rep(nn.Module):
         word_distribution_logits = [torch.zeros((batch_size,sent_len,self.tag_wise_vocabsize[i]),device=self.device) for i in range(self.num_tags)]
         for idx in range(sent_len):
             embedding_input = torch.cat((embeddings[:,idx,:], torch.mm(tag_logits_sent_norm, self.tag_linear.weight)), 1).unsqueeze(1)
+            embedding_input = self.dropout(embedding_input)
             _,(h,c) = self.lstm(embedding_input,(h,c))
             h_lower = self.lower_hidden(h[-1]) #batch_size,100
             tag_logits_sent = self.tag_linear(h_lower) #batch_size,num_tags

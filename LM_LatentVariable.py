@@ -21,7 +21,7 @@ import copy
 import argparse
 import random
 
-from models import LM_latent
+from models import LM_latent, LM_latent_type_rep
 from vocab import Vocabulary
 
 
@@ -41,6 +41,7 @@ parser.add_argument('--outf', default='.', help='folder to output model checkpoi
 parser.add_argument('--manualSeed', type=int, default=9090, help='manual seed')
 parser.add_argument('--verbIter', type=int, default=50, help='number of batches for interval printing')
 parser.add_argument('--stepSize', type=int, default=5, help='number of steps after which learning rate reduces')
+parser.add_argument('--use_type_rep', type=bool, default=False , help='using type representation as input')
 
 parser.add_argument('--vocabSize', type=int, default=10000 , help='max size of input and output vocabulary')
 parser.add_argument('--hiddenSize', type=int, default=512 , help='hidden size of lstm layer')
@@ -48,7 +49,8 @@ parser.add_argument('--tokenEmbeddingSize', type=int, default=256 , help='embedd
 parser.add_argument('--tagEmbeddingSize', type=int, default=256 , help='dimension reduction for tag prediction')
 parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm layers')
 parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
-
+parser.add_argument('--dropout', type=int, default=0.1 , help='dropout probability')
+parser.add_argument('--weight_decay', type=int, default=1e-5 , help='weight decay')
 opt = parser.parse_args()
 
 ##################################################################3
@@ -66,7 +68,9 @@ lr = opt.lr
 stepsize = opt.stepSize
 epochs = opt.niter
 outfolder = opt.outf
-
+dropout_p = opt.dropout
+weight_decay = opt.weight_decay
+use_type_rep = opt.use_type_rep
 try:
     os.makedirs(opt.outf)
 except OSError:
@@ -478,8 +482,10 @@ dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffl
 
 options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
            "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id}
-
-model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers)
+if use_type_rep:
+    model = LM_latent_type_rep(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers, dropout_p).to(device)
+else:
+    model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers, dropout_p)
 
 if opt.ngpu > 1:
     f.write("Let's use", torch.cuda.device_count(), "GPUs!")
@@ -495,7 +501,7 @@ if opt.netCont !='':
 
 criterion = latent_loss
 model_parameters = [p for p in model.parameters() if p.requires_grad]
-optimizer = optim.Adam(model_parameters, lr=lr)
+optimizer = optim.Adam(model_parameters, lr=lr, weight_decay=weight_decay)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
 bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
 torch.save(model.state_dict(), '%s/net_best_weights.pth' % (opt.outf))
