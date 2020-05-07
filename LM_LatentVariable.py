@@ -102,7 +102,7 @@ with open(test_pickle_file,"rb") as a:
 with open('tagset.txt') as a:
     alltags = a.read()
 
-alltags = list(map(lambda strline: strline.split('\t')[1], alltags.split('\n')))
+alltags = alltags.split('\n')    
 alltags = alltags + ['UNKNOWN']
 alltags = set(alltags)
 
