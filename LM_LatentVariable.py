@@ -49,8 +49,8 @@ parser.add_argument('--tokenEmbeddingSize', type=int, default=256 , help='embedd
 parser.add_argument('--tagEmbeddingSize', type=int, default=256 , help='dimension reduction for tag prediction')
 parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm layers')
 parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
-parser.add_argument('--dropout', type=int, default=0.1 , help='dropout probability')
-parser.add_argument('--weight_decay', type=int, default=1e-5 , help='weight decay')
+parser.add_argument('--dropout', type=float, default=0.1 , help='dropout probability')
+parser.add_argument('--weight_decay', type=float, default=1e-5 , help='weight decay')
 opt = parser.parse_args()
 
 ##################################################################3
