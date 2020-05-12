@@ -40,7 +40,7 @@ parser.add_argument('--netCont', default='', help="path to net (to continue trai
 parser.add_argument('--outf', default='.', help='folder to output model checkpoints')
 parser.add_argument('--manualSeed', type=int, default=9090, help='manual seed')
 parser.add_argument('--verbIter', type=int, default=50, help='number of batches for interval printing')
-parser.add_argument('--stepSize', type=int, default=5, help='number of steps after which learning rate reduces')
+parser.add_argument('--stepSize', type=int, default=7, help='number of steps after which learning rate reduces')
 parser.add_argument('--use_type_rep', type=bool, default=False , help='using type representation as input')
 
 parser.add_argument('--vocabSize', type=int, default=10000 , help='max size of input and output vocabulary')
