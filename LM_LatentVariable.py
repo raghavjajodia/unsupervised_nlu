@@ -51,6 +51,7 @@ parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm la
 parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
 parser.add_argument('--dropout', type=float, default=0.1 , help='dropout probability')
 parser.add_argument('--weight_decay', type=float, default=1e-5 , help='weight decay')
+parser.add_argument('--reverseDirection', action='store_true', help='trains autoregressive model in reverse direction')
 opt = parser.parse_args()
 
 ##################################################################3
@@ -122,7 +123,7 @@ PAD_TAG_ID = -51
 ######################################################################
 
 class POSDataset(Dataset):
-    def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60):
+    def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60, reverse=False):
         self.root = instanceDict['tagged_sents']
         self.vocab = vocab
         self.tag2id = tag2id
@@ -138,6 +139,9 @@ class POSDataset(Dataset):
                 mlength = len(sample)
             else:
                 mlength = max_sent_len
+            
+            if reverse:
+                sample = sample[::-1]
                 
             newsample = [Vocabulary.BOS] + sample[:mlength] + [Vocabulary.EOS]
             input_toks = self.vocab.encode_token_seq(newsample[:-1])
@@ -151,6 +155,9 @@ class POSDataset(Dataset):
                 mlength = len(sentences)
             else:
                 mlength = max_sent_len
+            
+            if reverse:
+                sentences = sentences[::-1]
             
             outputsample = sentences[:mlength] + [(Vocabulary.EOS, 'UNKNOWN')]
             outputsample = [self.tag2id[tup[1]] if tup[1] in self.tag2id else self.tag2id['UNKNOWN'] for tup in outputsample]
@@ -367,10 +374,16 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
     f.write('Training complete in {:.0f}m {:.0f}s \n'.format(time_elapsed // 60, time_elapsed % 60))
     f.write('Best val loss: {:4f} \n'.format(best_loss))
     f.flush()
+    
+    #Save weights of the best model
+    torch.save({
+        'epoch': 'best_epoch',
+        'model_state_dict': best_model_wts,
+        'full_metrics': metrics_dict,
+        'hyperparams': hyperparams
+        }, '%s/net_best_weights.pth' % (checkpoint_path))
 
-    # load best model weights
-    model.load_state_dict(best_model_wts)
-    return model
+    return None
 
 
 # In[9]:
@@ -468,9 +481,9 @@ tag_wise_vocabsize = dict([(tag2id[tup[0]], tup[1][2]) for tup in vocab.tag_spec
 datasets = {}
 dataloaders = {}
 
-datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag)
-datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None)
-datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None)
+datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag, 60, opt.reverseDirection)
+datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
+datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
 
 dataloaders["train"] = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn_pos, pin_memory=True)
 dataloaders["valid"] = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
@@ -481,7 +494,8 @@ dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffl
 #############################################################
 
 options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
-           "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id}
+           "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id, "reverse":opt.reverseDirection,
+          "dropout": dropout_p, "weight_decay": weight_decay}
 if use_type_rep:
     model = LM_latent_type_rep(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers, dropout_p).to(device)
 else:
@@ -503,6 +517,5 @@ criterion = latent_loss
 model_parameters = [p for p in model.parameters() if p.requires_grad]
 optimizer = optim.Adam(model_parameters, lr=lr, weight_decay=weight_decay)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
-bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
-torch.save(model.state_dict(), '%s/net_best_weights.pth' % (opt.outf))
+train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
 f.close()
