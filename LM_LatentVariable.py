@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,6 +20,7 @@ import random
 
 from models import LM_latent, LM_latent_type_rep
 from vocab import Vocabulary
+from datasets import POSDataset
 
 
 ############################################################ Parsing
@@ -122,57 +120,6 @@ PAD_TAG_ID = -51
 
 ######################################################################
 
-class POSDataset(Dataset):
-    def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60, reverse=False):
-        self.root = instanceDict['tagged_sents']
-        self.vocab = vocab
-        self.tag2id = tag2id
-        self.id2tag = id2tag
-        
-        self.sents = [[s[0] for s in sentences] for sentences in self.root]
-        self.input_sents = []
-        self.output_sents = []
-        self.tags = []
-        for sample in self.sents:
-            
-            if max_sent_len == None:
-                mlength = len(sample)
-            else:
-                mlength = max_sent_len
-            
-            if reverse:
-                sample = sample[::-1]
-                
-            newsample = [Vocabulary.BOS] + sample[:mlength] + [Vocabulary.EOS]
-            input_toks = self.vocab.encode_token_seq(newsample[:-1])
-            output_toks = [self.vocab.encode_token_seq_tag(newsample[1:], self.id2tag[tagid]) for tagid in self.id2tag]
-            self.input_sents.append(input_toks)
-            self.output_sents.append(output_toks)
-            
-        for sentences in self.root:
-            
-            if max_sent_len == None:
-                mlength = len(sentences)
-            else:
-                mlength = max_sent_len
-            
-            if reverse:
-                sentences = sentences[::-1]
-            
-            outputsample = sentences[:mlength] + [(Vocabulary.EOS, 'UNKNOWN')]
-            outputsample = [self.tag2id[tup[1]] if tup[1] in self.tag2id else self.tag2id['UNKNOWN'] for tup in outputsample]
-            self.tags.append(outputsample)
-    
-    def __len__(self):
-        return len(self.root)
-    
-    def __getitem__(self,idx):
-        target_tensor = torch.as_tensor(self.tags[idx], dtype=torch.long)
-        input_tensor = torch.as_tensor(self.input_sents[idx], dtype=torch.long)
-        output_tensor = torch.as_tensor(self.output_sents[idx], dtype=torch.long)
-        return (input_tensor, output_tensor, target_tensor)
-# In[6]:
-
 
 def pad_list_of_tensors(list_of_tensors, pad_token):
     max_length = max([t.size(-1) for t in list_of_tensors])
@@ -196,9 +143,6 @@ def pad_collate_fn_pos(batch):
     target_tensor = pad_list_of_tensors(target_list, pad_token_output)
     target_labels = pad_list_of_tensors(target_labels, pad_token_tags)
     return input_tensor, target_tensor, target_labels
-
-
-# In[7]:
 
 
 def log_sum_exp(value, dim=None, keepdim=False):
@@ -263,8 +207,6 @@ def latent_loss(outputs, target, device):
     num_useful_tokens = (~tokenContributingToZeroLoss).sum().item()
     
     return torch.sum(finalLoss[~tokenContributingToZeroLoss]), num_useful_tokens
-
-# In[8]:
 
 
 def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path, f, verbIter, hyperparams, num_epochs=25):
@@ -386,17 +328,7 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
     return None
 
 
-# In[9]:
-def getTagPredictions(tag_logits, targets):
-    #targets dim # btchsize x numtags x sentLen
-    btch_size = tag_logits.shape[0]
-    sent_len = tag_logits.shape[1]
-    num_tags = tag_logits.shape[2]
-
-#     tag_logits_cloned = tag_logits.clone()
-#     outofvocab_mask = (torch.transpose(targets, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
-#     tag_logits_cloned[outofvocab_mask] = float('-inf')
-#     predictions = torch.max(tag_logits_cloned, dim=-1).indices #btchsize x sentlen
+def getTagPredictions(tag_logits):
     predictions = torch.max(tag_logits, dim=-1).indices
     return predictions
 
@@ -404,19 +336,19 @@ def getTagPredictions(tag_logits, targets):
 def perplexity(avg_epoch_loss):
     return 2**(avg_epoch_loss/np.log(2))
 
-def getTokenAccuracy(tag_logits, labels, targets):
+def getTokenAccuracy(tag_logits, labels):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     num = (predictions[mask] == labels[mask]).sum().item()
     den = labels[mask].shape[0]
     return num, den
 
-def getSentenceAccuracy(tag_logits, labels, targets):
+def getSentenceAccuracy(tag_logits, labels):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     
     sentCount = 0
@@ -455,10 +387,10 @@ def evaluate(model, criterion, device, validation_loader):
                     
         # statistics
         running_loss += loss.item()
-        num, den = getTokenAccuracy(outputs[0], labels, targets)
+        num, den = getTokenAccuracy(outputs[0], labels)
         running_word += num
         total_words += den
-        num, den = getSentenceAccuracy(outputs[0], labels, targets)
+        num, den = getSentenceAccuracy(outputs[0], labels)
         running_sent += num
         total_sents += den
 

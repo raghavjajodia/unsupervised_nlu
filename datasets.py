@@ -1,11 +1,10 @@
 from torch.utils.data import Dataset, DataLoader
 import os
-import nibabel as nib
 import numpy as np
 import torch
-from scipy import ndimage
 import math
 import numpy as np
+from vocab import Vocabulary
 
 class POSDataset(Dataset):
     def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60, reverse=False):
