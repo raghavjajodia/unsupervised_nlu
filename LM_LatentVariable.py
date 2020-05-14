@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,6 +20,7 @@ import random
 
 from models import LM_latent, LM_latent_type_rep
 from vocab import Vocabulary
+from datasets import POSDataset
 
 
 ############################################################ Parsing
@@ -40,7 +38,7 @@ parser.add_argument('--netCont', default='', help="path to net (to continue trai
 parser.add_argument('--outf', default='.', help='folder to output model checkpoints')
 parser.add_argument('--manualSeed', type=int, default=9090, help='manual seed')
 parser.add_argument('--verbIter', type=int, default=50, help='number of batches for interval printing')
-parser.add_argument('--stepSize', type=int, default=5, help='number of steps after which learning rate reduces')
+parser.add_argument('--stepSize', type=int, default=7, help='number of steps after which learning rate reduces')
 parser.add_argument('--use_type_rep', type=bool, default=False , help='using type representation as input')
 
 parser.add_argument('--vocabSize', type=int, default=10000 , help='max size of input and output vocabulary')
@@ -51,6 +49,7 @@ parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm la
 parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
 parser.add_argument('--dropout', type=float, default=0.1 , help='dropout probability')
 parser.add_argument('--weight_decay', type=float, default=1e-5 , help='weight decay')
+parser.add_argument('--reverseDirection', action='store_true', help='trains autoregressive model in reverse direction')
 opt = parser.parse_args()
 
 ##################################################################3
@@ -121,51 +120,6 @@ PAD_TAG_ID = -51
 
 ######################################################################
 
-class POSDataset(Dataset):
-    def __init__(self, instanceDict, vocab, tag2id, id2tag, max_sent_len=60):
-        self.root = instanceDict['tagged_sents']
-        self.vocab = vocab
-        self.tag2id = tag2id
-        self.id2tag = id2tag
-        
-        self.sents = [[s[0] for s in sentences] for sentences in self.root]
-        self.input_sents = []
-        self.output_sents = []
-        self.tags = []
-        for sample in self.sents:
-            
-            if max_sent_len == None:
-                mlength = len(sample)
-            else:
-                mlength = max_sent_len
-                
-            newsample = [Vocabulary.BOS] + sample[:mlength] + [Vocabulary.EOS]
-            input_toks = self.vocab.encode_token_seq(newsample[:-1])
-            output_toks = [self.vocab.encode_token_seq_tag(newsample[1:], self.id2tag[tagid]) for tagid in self.id2tag]
-            self.input_sents.append(input_toks)
-            self.output_sents.append(output_toks)
-            
-        for sentences in self.root:
-            
-            if max_sent_len == None:
-                mlength = len(sentences)
-            else:
-                mlength = max_sent_len
-            
-            outputsample = sentences[:mlength] + [(Vocabulary.EOS, 'UNKNOWN')]
-            outputsample = [self.tag2id[tup[1]] if tup[1] in self.tag2id else self.tag2id['UNKNOWN'] for tup in outputsample]
-            self.tags.append(outputsample)
-    
-    def __len__(self):
-        return len(self.root)
-    
-    def __getitem__(self,idx):
-        target_tensor = torch.as_tensor(self.tags[idx], dtype=torch.long)
-        input_tensor = torch.as_tensor(self.input_sents[idx], dtype=torch.long)
-        output_tensor = torch.as_tensor(self.output_sents[idx], dtype=torch.long)
-        return (input_tensor, output_tensor, target_tensor)
-# In[6]:
-
 
 def pad_list_of_tensors(list_of_tensors, pad_token):
     max_length = max([t.size(-1) for t in list_of_tensors])
@@ -189,9 +143,6 @@ def pad_collate_fn_pos(batch):
     target_tensor = pad_list_of_tensors(target_list, pad_token_output)
     target_labels = pad_list_of_tensors(target_labels, pad_token_tags)
     return input_tensor, target_tensor, target_labels
-
-
-# In[7]:
 
 
 def log_sum_exp(value, dim=None, keepdim=False):
@@ -256,8 +207,6 @@ def latent_loss(outputs, target, device):
     num_useful_tokens = (~tokenContributingToZeroLoss).sum().item()
     
     return torch.sum(finalLoss[~tokenContributingToZeroLoss]), num_useful_tokens
-
-# In[8]:
 
 
 def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path, f, verbIter, hyperparams, num_epochs=25):
@@ -367,23 +316,19 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
     f.write('Training complete in {:.0f}m {:.0f}s \n'.format(time_elapsed // 60, time_elapsed % 60))
     f.write('Best val loss: {:4f} \n'.format(best_loss))
     f.flush()
+    
+    #Save weights of the best model
+    torch.save({
+        'epoch': 'best_epoch',
+        'model_state_dict': best_model_wts,
+        'full_metrics': metrics_dict,
+        'hyperparams': hyperparams
+        }, '%s/net_best_weights.pth' % (checkpoint_path))
 
-    # load best model weights
-    model.load_state_dict(best_model_wts)
-    return model
+    return None
 
 
-# In[9]:
-def getTagPredictions(tag_logits, targets):
-    #targets dim # btchsize x numtags x sentLen
-    btch_size = tag_logits.shape[0]
-    sent_len = tag_logits.shape[1]
-    num_tags = tag_logits.shape[2]
-
-#     tag_logits_cloned = tag_logits.clone()
-#     outofvocab_mask = (torch.transpose(targets, 1, 2) == Vocabulary.TOKEN_NOT_IN_TAGVOCAB)
-#     tag_logits_cloned[outofvocab_mask] = float('-inf')
-#     predictions = torch.max(tag_logits_cloned, dim=-1).indices #btchsize x sentlen
+def getTagPredictions(tag_logits):
     predictions = torch.max(tag_logits, dim=-1).indices
     return predictions
 
@@ -391,19 +336,19 @@ def getTagPredictions(tag_logits, targets):
 def perplexity(avg_epoch_loss):
     return 2**(avg_epoch_loss/np.log(2))
 
-def getTokenAccuracy(tag_logits, labels, targets):
+def getTokenAccuracy(tag_logits, labels):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     num = (predictions[mask] == labels[mask]).sum().item()
     den = labels[mask].shape[0]
     return num, den
 
-def getSentenceAccuracy(tag_logits, labels, targets):
+def getSentenceAccuracy(tag_logits, labels):
     #tag_logits ->  btchsize x sentlen x numtags
     #labels -> btchsize x sentlen
-    predictions = getTagPredictions(tag_logits, targets) #btchsize x sentlen
+    predictions = getTagPredictions(tag_logits) #btchsize x sentlen
     mask = ((labels != UNKNOWN_TAG) & (labels != PAD_TAG_ID))
     
     sentCount = 0
@@ -442,10 +387,10 @@ def evaluate(model, criterion, device, validation_loader):
                     
         # statistics
         running_loss += loss.item()
-        num, den = getTokenAccuracy(outputs[0], labels, targets)
+        num, den = getTokenAccuracy(outputs[0], labels)
         running_word += num
         total_words += den
-        num, den = getSentenceAccuracy(outputs[0], labels, targets)
+        num, den = getSentenceAccuracy(outputs[0], labels)
         running_sent += num
         total_sents += den
 
@@ -468,9 +413,9 @@ tag_wise_vocabsize = dict([(tag2id[tup[0]], tup[1][2]) for tup in vocab.tag_spec
 datasets = {}
 dataloaders = {}
 
-datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag)
-datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None)
-datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None)
+datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag, 60, opt.reverseDirection)
+datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
+datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
 
 dataloaders["train"] = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn_pos, pin_memory=True)
 dataloaders["valid"] = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
@@ -481,7 +426,8 @@ dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffl
 #############################################################
 
 options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
-           "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id}
+           "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id, "reverse":opt.reverseDirection,
+          "dropout": dropout_p, "weight_decay": weight_decay}
 if use_type_rep:
     model = LM_latent_type_rep(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers, dropout_p).to(device)
 else:
@@ -503,6 +449,5 @@ criterion = latent_loss
 model_parameters = [p for p in model.parameters() if p.requires_grad]
 optimizer = optim.Adam(model_parameters, lr=lr, weight_decay=weight_decay)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
-bst_model = train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
-torch.save(model.state_dict(), '%s/net_best_weights.pth' % (opt.outf))
+train_model(model, criterion, optimizer, exp_lr_scheduler, device, outfolder, f, opt.verbIter, options, epochs)
 f.close()
