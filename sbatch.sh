@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --output=/misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/base_lstm_defpar_reverse/a/train_logs.out
-#SBATCH --error=/misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/base_lstm_defpar_reverse/a/train_logs.err
+#SBATCH --output=/misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/test/a/train_logs.out
+#SBATCH --error=/misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/test/a/train_logs.err
 #SBATCH --exclude=lion3,lion17
-#SBATCH --job-name=defpar_rev
+#SBATCH --job-name=test
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
@@ -18,5 +18,5 @@ module load cuda/9.0.176
 eval "$(conda shell.bash hook)"
 conda activate dgl_env
 srun python3 LM_LatentVariable.py --dataroot /misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/ \
-    --batchSize 64 --outf /misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/base_lstm_defpar_reverse/a/ \
-    --cuda --reverseDirection
+    --batchSize 64 --outf /misc/vlgscratch4/BrunaGroup/rj1408/nlu/ptb_wsj_pos/models/test/a/ \
+    --cuda

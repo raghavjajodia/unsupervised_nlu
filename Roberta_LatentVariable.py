@@ -18,58 +18,57 @@ import copy
 import argparse
 import random
 
-from models import LM_latent, LM_latent_type_rep
+from models import Autoregressive_Roberta_Autoencoder
+from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 from vocab import Vocabulary
-from datasets import POSDataset
-from utils import pad_list_of_tensors, pad_collate_fn_pos, log_sum_exp
+from datasets import POS_RobertaDataset
+from utils import pad_list_of_tensors, pad_collate_fn_pos, log_sum_exp, pad_collate_roberta
+
 
 ############################################################ Parsing
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataroot', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
-parser.add_argument('--batchSize', type=int, default=96, help='input batch size')
-parser.add_argument('--niter', type=int, default=30, help='number of epochs to train for')
-parser.add_argument('--lr', type=float, default=0.01, help='learning rate, default=0.001')
+parser.add_argument('--batchSize', type=int, default=2, help='input batch size')
+parser.add_argument('--niter', type=int, default=20, help='number of epochs to train for')
+parser.add_argument('--lr', type=float, default=0.00001, help='learning rate, default=0.00001')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netCont', default='', help="path to net (to continue training)")
 parser.add_argument('--outf', default='.', help='folder to output model checkpoints')
 parser.add_argument('--manualSeed', type=int, default=9090, help='manual seed')
-parser.add_argument('--verbIter', type=int, default=50, help='number of batches for interval printing')
-parser.add_argument('--stepSize', type=int, default=7, help='number of steps after which learning rate reduces')
+parser.add_argument('--verbIter', type=int, default=400, help='number of batches for interval printing')
+parser.add_argument('--stepSize', type=int, default=20, help='number of steps after which learning rate reduces')
 parser.add_argument('--use_type_rep', type=bool, default=False , help='using type representation as input')
 
 parser.add_argument('--vocabSize', type=int, default=10000 , help='max size of input and output vocabulary')
 parser.add_argument('--hiddenSize', type=int, default=512 , help='hidden size of lstm layer')
 parser.add_argument('--tokenEmbeddingSize', type=int, default=256 , help='embedding size of input token')
-parser.add_argument('--tagEmbeddingSize', type=int, default=256 , help='dimension reduction for tag prediction')
+parser.add_argument('--tagEmbeddingSize', type=int, default=256, help='dimension reduction for tag prediction')
 parser.add_argument('--lstmLayers', type=int, default=3 , help='numer of lstm layers')
 parser.add_argument('--maxSentLen', type=int, default=60 , help='maximum len of sentence for training')
-parser.add_argument('--dropout', type=float, default=0.1 , help='dropout probability')
-parser.add_argument('--weight_decay', type=float, default=1e-5 , help='weight decay')
 parser.add_argument('--reverseDirection', action='store_true', help='trains autoregressive model in reverse direction')
+
+parser.add_argument('--checkpointf', default='.', help='folder to output model checkpoints')
+
 opt = parser.parse_args()
 
 ##################################################################3
 ##Assigning device and setup
 ###############################################################3
 
-max_vocab_size = opt.vocabSize
-batch_size = opt.batchSize #takes about 12gb memory with below config
-hidden_size = opt.hiddenSize
-token_embedding_size = opt.tokenEmbeddingSize
-tag_embedding_size = opt.tagEmbeddingSize
-lstm_layers = opt.lstmLayers
+batch_size = opt.batchSize
 max_sent_len = opt.maxSentLen
 lr = opt.lr
 stepsize = opt.stepSize
 epochs = opt.niter
 outfolder = opt.outf
-dropout_p = opt.dropout
-weight_decay = opt.weight_decay
 use_type_rep = opt.use_type_rep
+
+checkpoint_model_path = os.path.join(opt.checkpointf, 'net_best_weights.pth')
+
 try:
     os.makedirs(opt.outf)
 except OSError:
@@ -87,36 +86,6 @@ if torch.cuda.is_available() and not opt.cuda:
 device = torch.device("cuda:0" if opt.cuda else "cpu")
 f.write("using " + str(device) + "\n")
 f.flush()
-
-###################################################################
-## Data Reading and Preparation
-###############################################################
-train_pickle_file = os.path.join(opt.dataroot, 'train.p')
-val_pickle_file = os.path.join(opt.dataroot, 'val.p')
-test_pickle_file = os.path.join(opt.dataroot, 'test.p')
-
-with open(train_pickle_file,"rb") as a:
-    traindict = pkl.load(a)
-with open(val_pickle_file,"rb") as a:
-    valdict = pkl.load(a)
-with open(test_pickle_file,"rb") as a:
-    testdict = pkl.load(a)
-
-with open('tagset.txt') as a:
-    alltags = a.read()
-
-alltags = alltags.split('\n')    
-alltags = alltags + ['UNKNOWN']
-alltags = set(alltags)
-
-tag2id = defaultdict(int)
-id2tag = defaultdict(str)
-for i, tag in enumerate(alltags):
-    tag2id[tag] = i
-    id2tag[i] = tag
-    
-UNKNOWN_TAG = tag2id['UNKNOWN']
-PAD_TAG_ID = -51
 
 ######################################################################
 
@@ -195,11 +164,13 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
 
         end = time.time()
         
-        for batch_num, (inputs, target, labels) in enumerate(dataloaders["train"]):
+        for batch_num, (inputs, target, labels, roberta_inp, attn) in enumerate(dataloaders["train"]):
             
             data_time = time.time() - end
             inputs = inputs.to(device)
             target = target.to(device)
+            roberta_inp = roberta_inp.to(device)
+            attn = attn.to(device)
             
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -211,7 +182,7 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
             forward_start_time  = time.time()
 
             with torch.set_grad_enabled(True):
-                outputs = model(inputs)
+                outputs = model(inputs, roberta_inp, attn)
                 loss, useful_tokens = criterion(outputs, target, device)
                 
                 # statistics
@@ -281,7 +252,6 @@ def train_model(model, criterion, optimizer, scheduler, device, checkpoint_path,
 
     return None
 
-
 def getTagPredictions(tag_logits):
     predictions = torch.max(tag_logits, dim=-1).indices
     return predictions
@@ -327,16 +297,18 @@ def evaluate(model, criterion, device, validation_loader):
     non_pad_tokens_cache = 0
 
     # Iterate over data.
-    for batch_num, (inputs, targets, labels) in enumerate(validation_loader):
+    for batch_num, (inputs, targets, labels, roberta_inp, attn) in enumerate(validation_loader):
 
         inputs = inputs.to(device)
         targets = targets.to(device)
         labels = labels.to(device)
+        roberta_inp = roberta_inp.to(device)
+        attn = attn.to(device)
 
         batchSize = inputs.size(0)
         n_samples += batchSize
 
-        outputs = model(inputs)
+        outputs = model(inputs, roberta_inp, attn)
         loss, useful_tokens = criterion(outputs, targets, device)
                     
         # statistics
@@ -356,50 +328,81 @@ def evaluate(model, criterion, device, validation_loader):
     sentaccuracy = running_sent/total_sents
     return epoch_loss, tokenaccuracy, sentaccuracy
 
+##############################################################
+#Checkpoint loading
+#############################################################
+
+#Load forward model
+checkpoint_model = torch.load(checkpoint_model_path, map_location=device)
+tag2id = checkpoint_model["hyperparams"]["tagtoid"]
+id2tag = defaultdict(str)
+for tag in tag2id:
+    id2tag[tag2id[tag]] = tag
+
+UNKNOWN_TAG = tag2id['UNKNOWN']
+PAD_TAG_ID = -51    
+    
+vocab = checkpoint_model["hyperparams"]["vocab"]
+hidden_size = checkpoint_model["hyperparams"]["hidden_size"]
+tok_emb_size = checkpoint_model["hyperparams"]["token_embedding"]
+tag_emb_size = checkpoint_model["hyperparams"]["tag_emb_size"]
+lstm_layers = checkpoint_model["hyperparams"]["lstmLayers"]
+dropout_p = checkpoint_model["hyperparams"]["dropout"]
+weight_decay = checkpoint_model['hyperparams']['weight_decay']
+tag_wise_vocabsize = dict([(tag2id[tup[0]], tup[1][2]) for tup in vocab.tag_specific_vocab.items()])
 
 #####################################################################
 ## Data loading 
-####################################################################
-
-vocab = Vocabulary(traindict, max_vocab_size, alltags)
-tag_wise_vocabsize = dict([(tag2id[tup[0]], tup[1][2]) for tup in vocab.tag_specific_vocab.items()])
+#####################################################################
 
 datasets = {}
 dataloaders = {}
 
-datasets["train"] = POSDataset(traindict, vocab, tag2id, id2tag, 60, opt.reverseDirection)
-datasets["valid"] = POSDataset(valdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
-datasets["test"] = POSDataset(testdict, vocab, tag2id, id2tag, None, opt.reverseDirection)
+train_pickle_file = os.path.join(opt.dataroot, 'train.p')
+val_pickle_file = os.path.join(opt.dataroot, 'val.p')
+test_pickle_file = os.path.join(opt.dataroot, 'test.p')
 
-dataloaders["train"] = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=pad_collate_fn_pos, pin_memory=True)
-dataloaders["valid"] = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
-dataloaders["test"] = DataLoader(datasets["test"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_fn_pos, pin_memory=True)
+with open(train_pickle_file,"rb") as a:
+    traindict = pkl.load(a)
+with open(val_pickle_file,"rb") as a:
+    valdict = pkl.load(a)
+with open(test_pickle_file,"rb") as a:
+    testdict = pkl.load(a)
 
-##############################################################
-#Model initialization and training
-#############################################################
+with open('tagset.txt') as a:
+    alltags = a.read()
 
-options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":token_embedding_size, 
-           "tag_emb_size":tag_embedding_size, "lstmLayers": lstm_layers, "tagtoid":tag2id, "reverse":opt.reverseDirection,
-          "dropout": dropout_p, "weight_decay": weight_decay}
-if use_type_rep:
-    model = LM_latent_type_rep(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, device, lstm_layers, dropout_p).to(device)
-else:
-    model = LM_latent(vocab.vocab_size, tag_wise_vocabsize, hidden_size, token_embedding_size, tag_embedding_size, lstm_layers, dropout_p)
+alltags = alltags.split('\n')    
+alltags = alltags + ['UNKNOWN']
+alltags_set = set(alltags)
+
+datasets["train"] = POS_RobertaDataset(traindict, vocab, tag2id, id2tag, 60)
+datasets["valid"] = POS_RobertaDataset(valdict, vocab, tag2id, id2tag, None)
+datasets["test"] = POS_RobertaDataset(testdict, vocab, tag2id, id2tag, None)
+
+dataloaders["train"] = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=pad_collate_roberta, pin_memory=True)
+dataloaders["valid"] = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_roberta, pin_memory=True)
+dataloaders["test"]  = DataLoader(datasets["test"], batch_size=batch_size, shuffle=False, collate_fn=pad_collate_roberta, pin_memory=True)
+
+model = Autoregressive_Roberta_Autoencoder(vocab.vocab_size, tag_wise_vocabsize, hidden_size, tok_emb_size, tag_emb_size, lstm_layers, dropout_p)
+model.load_state_dict(checkpoint_model['model_state_dict'])
+
+for param in model.robertaEncoder.parameters():
+    param.requires_grad = True
 
 if opt.ngpu > 1:
-    f.write("Let's use", torch.cuda.device_count(), "GPUs!")
+    f.write("Let's use " +  str(torch.cuda.device_count()) + " GPUs!")
     f.flush()
     model = nn.DataParallel(model)
 
 model = model.to(device)
 
-if opt.netCont !='':
-    model.load_state_dict(torch.load(opt.netCont, map_location=device))
-    f.write('Loaded state and continuing training')
-    f.flush()
+options = {"vocab":vocab, "hidden_size": hidden_size, "token_embedding":tok_emb_size, 
+           "tag_emb_size":tag_emb_size, "lstmLayers": lstm_layers, "tagtoid":tag2id, "reverse":False,
+          "dropout": dropout_p, "weight_decay": weight_decay}
 
 criterion = latent_loss
+
 model_parameters = [p for p in model.parameters() if p.requires_grad]
 optimizer = optim.Adam(model_parameters, lr=lr, weight_decay=weight_decay)
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=stepsize, gamma=0.1)
